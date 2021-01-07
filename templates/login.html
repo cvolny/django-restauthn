@@ -1,0 +1,76 @@
+<html>
+<head>
+    <script type="text/javascript" src="/static/js/cbor.js"></script>
+    <script type="text/javascript">
+    function getCookie(name) {
+        const value = `; ${document.cookie}`;
+        const parts = value.split(`; ${name}=`);
+        if (parts.length === 2) return parts.pop().split(';').shift();
+    }
+    function login(e) {
+        e.preventDefault();
+        var error = document.getElementById("error");
+        var success = document.getElementById("success");
+        var username = document.getElementById("username-field").value;
+        var endpoint1 = document.getElementById("endpoint-1-field").value;
+        var endpoint2 = document.getElementById("endpoint-2-field").value;
+        var headers = {
+            "Content-Type": "application/cbor",
+            "X-CSRFToken": getCookie("csrftoken")
+        }
+        fetch(endpoint1, {headers: headers, method: "POST", body: CBOR.encode({"username": username})})
+            .then(res => {
+                if (res.ok)
+                    return res.arrayBuffer();
+                success.innerText = "";
+                error.innerText = "Failed Begin Endpoint";
+            }).then(CBOR.decode)
+            .then(options => navigator.credentials.get(options))
+            .then(assertion => {
+                fetch(endpoint2, {headers: headers, method: "POST", body: CBOR.encode({
+                    "username":          username,
+                    "credentialId":      new Uint8Array(assertion.rawId),
+                    "authenticatorData": new Uint8Array(assertion.response.authenticatorData),
+                    "clientDataJSON":    new Uint8Array(assertion.response.clientDataJSON),
+                    "signature":         new Uint8Array(assertion.response.signature),
+                })}).then(res => {
+                    var s = "";
+                    var e = "";
+                    if (res.ok) {
+                        s = "Logged in Successfullly";
+                    } else {
+                        e = "Failed Completion Endpoint";
+                    }
+                    success.innerText = s;
+                    error.innerText = e;
+                });
+            });
+        return false;
+    }
+    </script>
+</head>
+<body>
+<h1>Register</h1>
+<form onsubmit="login(event)">
+<table>
+<tr>
+    <td colspan="2"><span id="error" style="color: red"></span><span id="success" style="color: green"></span></td>
+</tr>
+<tr>
+    <td><label for="username-field">Username:</label></td>
+    <td><input id="username-field" type="text" placeholder="username" required /></td>
+</tr>
+<tr>
+    <td><label for="endpoint-1-field">Begin Endpoint:</label></td>
+    <td><input id="endpoint-1-field" type="text" value="/api/auth/login/begin/" required /></td>
+</tr>
+<tr>
+    <td><label for="endpoint-2-field">Final Endpoint:</label></td>
+    <td><input id="endpoint-2-field" type="text" value="/api/auth/login/" required /></td>
+</tr>
+<tr>
+    <td colspan="2"><button type="submit">Login</button></td>
+</tr>
+</form>
+</body>
+</html>
