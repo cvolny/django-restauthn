@@ -29,10 +29,40 @@ RP = PublicKeyCredentialRpEntity(settings.FIDO2.RP_URL, settings.FIDO2.RP_NAME)
 SERVER = Fido2Server(RP)
 
 
+def redact(data, fields=['password'], redacted="_redacted_"):
+    return {k: (v if k not in fields else redacted) for k, v in data.items() }
+
+
 def getuser(user):
     if user.is_authenticated:
-        return dict(username=user.username, full_name=(user.get_full_name() or user.username))
-    return dict(username=None, full_name=None)
+        return dict(
+            username=user.username,
+            full_name=(user.get_full_name() or user.username),
+            is_staff=user.is_staff,
+            is_authenticated=True)
+    return dict(
+        username=None,
+        full_name='Not logged in',
+        is_staff=False,
+        is_authenticated=False)
+
+
+@api_view(['POST'])
+@permission_classes([])
+def redeem_login_token(request, format=None):
+    username = request.data.get('username', None)
+    token = request.data.get('token', None)
+    logger.warn(f'redeem_login_token({username}, {token})')
+    if username and token:
+        user = get_user_model().objects.get(username=username)
+        if user:
+            token = user.tokens.get(pk=token)
+            if token.redeem():
+                auth.login(request, user)
+                return Response(dict(detail="OK"))
+            else:
+                return Response(dict(detail="Token expired"), status=status.HTTP_401_UNAUTHORIZED)
+    return Response(dict(detail="Bad login"), status=status.HTTP_401_UNAUTHORIZED)
 
 
 @api_view(permissions.SAFE_METHODS)
@@ -42,7 +72,7 @@ def get_username(request, format=None):
     """
     Getter for current username/fullname if authenticated; None if anonymous.
     """
-    return Resposne(dict(details="OK", user=getuser(request.user)))
+    return Response(dict(details="OK", user=getuser(request.user)))
 
 @api_view(permissions.SAFE_METHODS)
 @permission_classes([])
@@ -130,10 +160,8 @@ class BaseWebauthnView(APIView):
 
     Configured for CBOR encoded data, but with BrowseableAPI and JSON support if DEBUG=T.
     """
-    renderer_classes = (CborRenderer, CborBrowsableAPIRenderer) \
-                        if settings.DEBUG else (CborRenderer,)
-    parser_classes = (CborParser, JSONParser) \
-                        if settings.DEBUG else (CborRenderer,)
+    renderer_classes = (CborRenderer, CborBrowsableAPIRenderer)
+    parser_classes = (CborParser, JSONParser)
 
 class BaseWebauthnLoginView(BaseWebauthnView):
     """
@@ -194,7 +222,7 @@ class WebauthnRegister(BaseWebauthnRegisterView):
                     cred_data = auth_data.credential_data
                     authenticator = Authenticator.objects.create(user=request.user, credential=cred_data)
                     logger.info(f'register fido2 for "{request.user.username}": {cred_data.credential_id}')
-                    return Response(dict(detail="OK"))
+                    return Response(dict(detail="OK", user=getuser(request.user)))
                 except Exception as e:
                     logger.warn(f'Exception webauthn-register.{format} {request.user.username}: {e}')
         return Response(dict(detail="Bad request"), status=status.HTTP_400_BAD_REQUEST)
@@ -207,21 +235,24 @@ class WebauthnLoginBegin(BaseWebauthnLoginView):
         generate a webauthn challenge, store state in session, and return challenge as response.
     """
     def post(self, request, format=None):
-        logger.info(f'webauthn-login-begin.{format}: {request.data}')
+        logger.warn(f'webauthn-login-begin.{format}: {request.data.keys()}')
         if request.user.is_authenticated:
             return Response(dict(detail="Already authenticated"), status=status.HTTP_401_UNAUTHORIZED)
         authargs = {k: v for k, v in request.data.items() if k in settings.FIDO2.LOGIN_FIELDS }
         if authargs:
             user = auth.authenticate(request, passwordless=True, **authargs)
-            #user = get_user_model().objects.get(username=authargs.get('username'))
             if user:
                 credentials = [ x.credential for x in user.authenticators.all() ]
                 if credentials:
                     data, state = SERVER.authenticate_begin(credentials, user_verification=settings.FIDO2.USER_VERIFICATION)
                     request.session[settings.FIDO2.SESSION_STATE_KEY] = state
                     return Response(data)
+                logger.warn(f'No authenticators registered for login attempt by {user.username}')
                 return Response(dict(detail="No Authenticators Registered"), status=status.HTTP_401_UNAUTHORIZED)
-        return Response(dict(detail="Bad Username"), status=status.HTTP_401_UNAUTHORIZED)
+            logger.warn(f'Bad authargs {redact(authargs)}')
+        else:
+            logger.warn(f'Bad payload: {redact(request.data)}')
+        return Response(dict(detail="Bad payload"), status=status.HTTP_400_BAD_REQUEST)
 
 class WebauthnLogin(BaseWebauthnLoginView):
     """
